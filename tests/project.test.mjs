@@ -25,3 +25,16 @@ test('privacy-sensitive features use local browser APIs', async () => {
   assert.match(storage, /indexedDB/);
   assert.doesNotMatch(`${main}\n${storage}`, /fetch\(['"]https?:/);
 });
+
+test('scanner includes live camera, automatic edge detection and scan modes', async () => {
+  const [main, detector, scanner] = await Promise.all([
+    readFile(new URL('../src/main.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/detector.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/scanner.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(main, /getUserMedia/);
+  assert.match(main, /detectDocument/);
+  assert.match(detector, /findContours/);
+  assert.match(detector, /approxPolyDP/);
+  for (const mode of ['shadow', 'lighten', 'enhance', 'eco', 'gray', 'bw', 'invert']) assert.match(scanner, new RegExp(`mode === '${mode}'`));
+});

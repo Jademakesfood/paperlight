@@ -10,6 +10,7 @@
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
+    "@techstark/opencv-js": "^5.0.0-release.1",
     "docx": "^9.5.1",
     "jspdf": "^3.0.1",
     "tesseract.js": "^6.0.1"

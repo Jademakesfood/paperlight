@@ -174,8 +174,33 @@ footer span:first-child { font-family: 'DM Serif Display', serif; color: var(--i
 .active .filter-preview { border-color: var(--coral); }
 .filter-preview img { width: 100%; height: 100%; object-fit: cover; }
 .filter-preview.magic img { filter: brightness(1.1) contrast(1.12) saturate(1.05); }
+.filter-preview.auto img { filter: brightness(1.1) contrast(1.18) saturate(1.04); }
+.filter-preview.shadow img { filter: grayscale(.8) brightness(1.3) contrast(1.25); }
+.filter-preview.lighten img { filter: brightness(1.26); }
+.filter-preview.enhance img { filter: brightness(1.1) contrast(1.38) saturate(1.08); }
+.filter-preview.eco img { filter: grayscale(1) brightness(1.18) contrast(.94); }
 .filter-preview.gray img { filter: grayscale(1) contrast(1.1); }
 .filter-preview.bw img { filter: grayscale(1) contrast(1.75); }
+.filter-preview.invert img { filter: invert(1); }
+
+/* Live scanner */
+.camera-layer { padding: 0; background: #050807; backdrop-filter: none; }
+.camera-modal { width: 100%; height: 100%; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; color: white; background: #050807; }
+.camera-modal > header { min-height: 76px; display: grid; grid-template-columns: 50px 1fr 50px; align-items: center; gap: 12px; padding: max(12px, env(safe-area-inset-top)) 18px 12px; background: #080c0b; }
+.camera-modal > header > div { display: grid; justify-items: center; gap: 3px; }
+.camera-modal > header strong { font-size: 15px; }.camera-modal > header small { color: rgba(255,255,255,.58); font-size: 10px; }
+.camera-icon { width: 46px; height: 46px; display: grid; place-items: center; border: 0; border-radius: 50%; color: white; background: rgba(255,255,255,.08); cursor: pointer; }
+.camera-frame { position: relative; place-self: center; width: min(100%, 1100px); max-height: 100%; overflow: hidden; background: #000; }
+.camera-frame video, .camera-frame canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.camera-frame video { object-fit: cover; }.camera-frame canvas { pointer-events: none; }
+.camera-guide { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); padding: 8px 13px; border-radius: 99px; color: rgba(255,255,255,.86); background: rgba(0,0,0,.52); backdrop-filter: blur(8px); font-size: 11px; }
+.camera-modal > footer { min-height: 142px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 16px max(25px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(25px, env(safe-area-inset-left)); border: 0; color: white; background: #080c0b; }
+.camera-gallery { justify-self: start; display: grid; justify-items: center; gap: 5px; border: 0; color: rgba(255,255,255,.72); background: none; font-size: 9px; cursor: pointer; }
+.shutter { width: 82px; height: 82px; display: grid; place-items: center; padding: 0; border: 5px solid #25d99b; border-radius: 50%; background: transparent; cursor: pointer; }
+.shutter span { width: 62px; height: 62px; border-radius: 50%; background: #fff; transition: transform .12s; }.shutter:active span { transform: scale(.9); }
+.camera-detected { justify-self: end; display: grid; justify-items: center; gap: 5px; color: rgba(255,255,255,.58); font-size: 9px; }
+.camera-detected i { width: 13px; height: 13px; border-radius: 50%; background: #6a736f; box-shadow: 0 0 0 5px rgba(255,255,255,.05); }
+.camera-detected.ready { color: #31e3a4; }.camera-detected.ready i { background: #31e3a4; box-shadow: 0 0 0 5px rgba(49,227,164,.12), 0 0 20px rgba(49,227,164,.5); }
 
 .sheet-layer { align-items: flex-end; padding: 0; }
 .export-sheet, .text-sheet { width: min(560px, 100%); padding: 12px 27px max(28px, env(safe-area-inset-bottom)); border-radius: 24px 24px 0 0; background: var(--paper); box-shadow: 0 -15px 60px rgba(0,0,0,.2); transform: translateY(30px); transition: transform .2s; }
@@ -254,6 +279,8 @@ footer span:first-child { font-family: 'DM Serif Display', serif; color: var(--i
   .filter-list { gap: 7px; }
   .filter-preview { width: 49px; height: 55px; }
   .export-sheet, .text-sheet { padding-inline: 19px; }
+  .camera-modal > header { min-height: 70px; }.camera-modal > footer { min-height: 132px; }
+  .shutter { width: 76px; height: 76px; }.shutter span { width: 57px; height: 57px; }
 }
 
 @media (max-width: 410px) {

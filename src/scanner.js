@@ -56,30 +56,70 @@ function drawTriangle(ctx, image, source, destination) {
   ctx.restore();
 }
 
+function boxBlurGray(values, width, height, radius = 24) {
+  const horizontal = new Float32Array(values.length); const output = new Float32Array(values.length);
+  for (let y = 0; y < height; y += 1) {
+    let sum = 0;
+    for (let x = -radius; x <= radius; x += 1) sum += values[y * width + Math.max(0, Math.min(width - 1, x))];
+    for (let x = 0; x < width; x += 1) {
+      horizontal[y * width + x] = sum / (radius * 2 + 1);
+      sum += values[y * width + Math.min(width - 1, x + radius + 1)] - values[y * width + Math.max(0, x - radius)];
+    }
+  }
+  for (let x = 0; x < width; x += 1) {
+    let sum = 0;
+    for (let y = -radius; y <= radius; y += 1) sum += horizontal[Math.max(0, Math.min(height - 1, y)) * width + x];
+    for (let y = 0; y < height; y += 1) {
+      output[y * width + x] = sum / (radius * 2 + 1);
+      sum += horizontal[Math.min(height - 1, y + radius + 1) * width + x] - horizontal[Math.max(0, y - radius) * width + x];
+    }
+  }
+  return output;
+}
+
 function applyPixelFilter(canvas, filter) {
-  if (filter === 'color') return;
+  if (filter === 'color' || filter === 'original') return;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imageData.data;
+  const mode = filter === 'magic' ? 'auto' : filter;
+  let illumination;
+  if (mode === 'shadow' || mode === 'bw') {
+    const grayValues = new Uint8Array(canvas.width * canvas.height);
+    for (let i = 0, p = 0; i < data.length; i += 4, p += 1) grayValues[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    illumination = boxBlurGray(grayValues, canvas.width, canvas.height, Math.max(12, Math.round(Math.min(canvas.width, canvas.height) / 38)));
+  }
   for (let i = 0; i < data.length; i += 4) {
     const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    if (filter === 'gray') {
+    const light = illumination?.[i / 4] || 128;
+    if (mode === 'gray') {
       const v = Math.max(0, Math.min(255, (gray - 128) * 1.18 + 145));
       data[i] = data[i + 1] = data[i + 2] = v;
-    } else if (filter === 'bw') {
-      const v = gray > 158 ? 255 : gray < 92 ? 0 : (gray - 92) * 3.86;
+    } else if (mode === 'bw') {
+      const v = gray > light - 13 ? 255 : gray < light - 52 ? 0 : (gray - light + 52) * 6.54;
       data[i] = data[i + 1] = data[i + 2] = v;
-    } else if (filter === 'magic') {
+    } else if (mode === 'shadow') {
+      const v = Math.max(0, Math.min(255, (gray / Math.max(35, light)) * 232));
+      data[i] = data[i + 1] = data[i + 2] = (v - 128) * 1.22 + 142;
+    } else if (mode === 'invert') {
+      data[i] = 255 - data[i]; data[i + 1] = 255 - data[i + 1]; data[i + 2] = 255 - data[i + 2];
+    } else if (mode === 'lighten') {
+      data[i] = Math.min(255, data[i] * 1.08 + 22); data[i + 1] = Math.min(255, data[i + 1] * 1.08 + 22); data[i + 2] = Math.min(255, data[i + 2] * 1.08 + 22);
+    } else if (mode === 'enhance') {
+      data[i] = Math.max(0, Math.min(255, (data[i] - 118) * 1.3 + 140)); data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - 118) * 1.3 + 140)); data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - 118) * 1.3 + 140));
+    } else if (mode === 'eco') {
+      const v = Math.max(0, Math.min(255, (gray - 128) * 0.95 + 151)); data[i] = data[i + 1] = data[i + 2] = v;
+    } else if (mode === 'auto') {
       const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      data[i] = Math.min(255, (data[i] - avg) * 1.12 + avg * 1.08 + 8);
-      data[i + 1] = Math.min(255, (data[i + 1] - avg) * 1.08 + avg * 1.08 + 8);
-      data[i + 2] = Math.min(255, (data[i + 2] - avg) * 1.02 + avg * 1.08 + 5);
+      data[i] = Math.max(0, Math.min(255, (data[i] - avg) * 1.12 + (avg - 116) * 1.16 + 143));
+      data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - avg) * 1.08 + (avg - 116) * 1.16 + 143));
+      data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - avg) * 1.02 + (avg - 116) * 1.16 + 140));
     }
   }
   ctx.putImageData(imageData, 0, 0);
 }
 
-export async function processPage(source, corners = defaultCorners(), filter = 'magic', rotation = 0, maxDimension = 1800) {
+export async function processPage(source, corners = defaultCorners(), filter = 'auto', rotation = 0, maxDimension = 1800) {
   const image = await loadImage(source);
   const sourcePoints = corners.map((point) => ({ x: point.x * image.naturalWidth, y: point.y * image.naturalHeight }));
   let width = Math.max(distance(sourcePoints[0], sourcePoints[1]), distance(sourcePoints[3], sourcePoints[2]));
