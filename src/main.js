@@ -1,7 +1,7 @@
 import './styles.css';
 import { icon } from './icons.js';
 import { defaultCorners, fileToDataUrl, makeThumbnail, processPage } from './scanner.js';
-import { detectDocument } from './detector.js';
+import { detectDocument, prepareDetector } from './detector.js';
 import { listDocuments, removeDocument, saveDocument } from './storage.js';
 import { exportImages, exportPdf, exportWord } from './exporters.js';
 
@@ -41,9 +41,10 @@ function captureInput(capture = true) {
 }
 
 async function preparePage(original, detectedCorners = null) {
-  const corners = detectedCorners || await detectDocument(original).catch((error) => { console.warn('Document detection failed', error); return null; }) || defaultCorners();
+  const detected = detectedCorners || await detectDocument(original).catch((error) => { console.warn('Document detection failed', error); return null; });
+  const corners = detected || defaultCorners();
   const processed = await processPage(original, corners, 'auto');
-  return { id: uid(), original, processed, thumbnail: await makeThumbnail(processed), corners, filter: 'auto', rotation: 0, ocrText: '' };
+  return { id: uid(), original, processed, thumbnail: await makeThumbnail(processed), corners, autoCropped: Boolean(detected), filter: 'auto', rotation: 0, ocrText: '' };
 }
 
 async function addPreparedPages(pages) {
@@ -74,16 +75,17 @@ async function addFiles(files) {
 }
 
 async function openCamera() {
-  if (!navigator.mediaDevices?.getUserMedia) return captureInput(true);
+  if (!navigator.mediaDevices?.getUserMedia) { notify('Live camera is unavailable in this browser. Opening the phone camera instead.'); return captureInput(true); }
+  const detectorReady = prepareDetector().then(() => true).catch((error) => { console.warn('Detector unavailable', error); return false; });
   const layer = modal(`
     <section class="camera-modal">
-      <header><button class="camera-icon" data-close aria-label="Close camera">${icon('close')}</button><div><strong>Document scan</strong><small data-camera-status>Finding the page…</small></div><button class="camera-icon" data-gallery aria-label="Choose from photos">${icon('image')}</button></header>
+      <header><button class="camera-icon" data-close aria-label="Close camera">${icon('close')}</button><div><strong>Document scan</strong><small data-camera-status>Loading edge detector…</small></div><button class="camera-icon" data-gallery aria-label="Choose from photos">${icon('image')}</button></header>
       <div class="camera-frame"><video playsinline muted></video><canvas></canvas><div class="camera-guide">Point at a document</div></div>
       <footer><button class="camera-gallery" data-gallery>${icon('image')}<span>Photos</span></button><button class="shutter" data-shutter aria-label="Take photo"><span></span></button><div class="camera-detected" data-detected><i></i><span>Searching</span></div></footer>
     </section>`, 'camera-layer');
   const video = layer.querySelector('video'); const overlay = layer.querySelector('canvas'); const frame = layer.querySelector('.camera-frame');
   const status = layer.querySelector('[data-camera-status]'); const indicator = layer.querySelector('[data-detected]');
-  let stream; let timer; let detecting = false; let latestCorners = null; let closed = false;
+  let stream; let timer; let detecting = false; let latestCorners = null; let missedFrames = 0; let closed = false;
   const stop = () => { closed = true; clearInterval(timer); stream?.getTracks().forEach((track) => track.stop()); };
   const close = () => { stop(); closeModal(layer); };
   const drawCorners = (corners) => {
@@ -97,7 +99,11 @@ async function openCamera() {
     if (closed || detecting || video.readyState < 2) return;
     detecting = true;
     try {
-      latestCorners = await detectDocument(video, 620);
+      const detected = await detectDocument(video, 680);
+      if (detected) {
+        latestCorners = latestCorners ? detected.map((point, index) => ({ x: latestCorners[index].x * .58 + point.x * .42, y: latestCorners[index].y * .58 + point.y * .42 })) : detected;
+        missedFrames = 0;
+      } else if (++missedFrames >= 3) latestCorners = null;
       drawCorners(latestCorners);
       status.textContent = latestCorners ? 'Document detected' : 'Move closer and keep the edges visible';
       indicator.classList.toggle('ready', Boolean(latestCorners)); indicator.querySelector('span').textContent = latestCorners ? 'Ready' : 'Searching';
@@ -116,11 +122,19 @@ async function openCamera() {
     stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
     if (closed) return stream.getTracks().forEach((track) => track.stop());
     video.srcObject = stream; await video.play();
-    frame.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`; overlay.width = video.videoWidth; overlay.height = video.videoHeight;
-    await analyze(); timer = setInterval(analyze, 420);
+    overlay.width = video.videoWidth; overlay.height = video.videoHeight;
   } catch (error) {
-    console.warn('Live camera unavailable', error); close(); captureInput(true); notify('Live camera was unavailable, so the phone camera was opened instead.');
+    console.warn('Live camera unavailable', error);
+    status.textContent = 'Camera permission is off'; frame.classList.add('camera-error');
+    frame.querySelector('.camera-guide').textContent = 'Allow Camera in Safari Settings, or tap Photos';
+    indicator.querySelector('span').textContent = 'Unavailable';
+    return;
   }
+  if (!await detectorReady) {
+    status.textContent = 'Edge detector could not load'; indicator.querySelector('span').textContent = 'Capture manually';
+    return;
+  }
+  status.textContent = 'Finding the document edges…'; await analyze(); timer = setInterval(analyze, 560);
 }
 
 async function createDemoDocument() {
@@ -225,7 +239,7 @@ function renderDocument() {
     <article class="page-card" draggable="true" data-page="${page.id}">
       <div class="page-number"><span>${index + 1}</span></div>
       <button class="page-image" data-edit="${page.id}"><img src="${page.thumbnail}" alt="Page ${index + 1}"><span>${icon('crop', 16)} Edit page</span></button>
-      <div class="page-meta"><strong>Page ${index + 1}</strong><small>${page.ocrText ? 'Text recognized' : 'Ready to export'}</small></div>
+      <div class="page-meta"><strong>Page ${index + 1}</strong><small>${page.ocrText ? 'Text recognized' : page.autoCropped ? 'Edges found · straightened' : 'Check crop · edges uncertain'}</small></div>
       <button class="icon-button" data-page-menu="${page.id}" aria-label="Page options">${icon('more')}</button>
     </article>`).join('');
 
@@ -325,17 +339,30 @@ function showEditor(id) {
   const filters = [['original', 'Original'], ['auto', 'Auto'], ['shadow', 'No shadow'], ['lighten', 'Lighten'], ['enhance', 'Enhance'], ['eco', 'Eco'], ['gray', 'Grayscale'], ['bw', 'B&W'], ['invert', 'Invert']];
   const layer = modal(`
     <section class="editor-modal">
-      <header><button class="back-button" data-cancel>${icon('close')} <span>Cancel</span></button><div><strong>Edit page</strong><small>Drag the corners to fit the paper</small></div><button class="primary-button compact" data-save>${icon('check')} Done</button></header>
-      <div class="editor-stage"><div class="crop-wrap"><img src="${page.original}" alt="Document page"><svg class="crop-shade" preserveAspectRatio="none"><polygon></polygon></svg>${page.corners.map((point, index) => `<button class="crop-handle" data-corner="${index}" style="left:${point.x * 100}%;top:${point.y * 100}%" aria-label="Crop corner ${index + 1}"></button>`).join('')}</div></div>
+      <header><button class="back-button" data-cancel>${icon('close')} <span>Cancel</span></button><div><strong>Edit page</strong><small data-editor-status>Crop mode · drag corners to fit the paper</small></div><button class="primary-button compact" data-save>${icon('check')} Save</button></header>
+      <div class="editor-stage"><div class="crop-wrap"><img src="${page.original}" alt="Document page"><span class="editor-preview-loading"><i class="spinner"></i>Applying filter…</span><svg class="crop-shade" preserveAspectRatio="none"><polygon></polygon></svg>${page.corners.map((point, index) => `<button class="crop-handle" data-corner="${index}" style="left:${point.x * 100}%;top:${point.y * 100}%" aria-label="Crop corner ${index + 1}"></button>`).join('')}</div></div>
       <div class="editor-controls">
         <button class="rotate-control" data-detect>${icon('scan')}<span>Auto crop</span></button><button class="rotate-control" data-rotate>${icon('rotate')}<span>Rotate</span></button>
         <div class="filter-list">${filters.map(([key, label]) => `<button data-filter="${key}" class="${page.filter === key ? 'active' : ''}"><span class="filter-preview ${key}"><img src="${page.thumbnail}"></span><strong>${label}</strong></button>`).join('')}</div>
       </div>
     </section>`, 'editor-layer');
-  let corners = page.corners.map((point) => ({ ...point })); let rotation = page.rotation; let filter = page.filter;
-  const wrap = layer.querySelector('.crop-wrap'); const image = wrap.querySelector('img'); const polygon = wrap.querySelector('polygon');
+  let corners = page.corners.map((point) => ({ ...point })); let rotation = page.rotation; let filter = page.filter; let previewVersion = 0;
+  const wrap = layer.querySelector('.crop-wrap'); const image = wrap.querySelector('img'); const polygon = wrap.querySelector('polygon'); const editorStatus = layer.querySelector('[data-editor-status]');
   const updatePolygon = () => polygon.setAttribute('points', corners.map((p) => `${p.x * 100},${p.y * 100}`).join(' '));
-  image.onload = updatePolygon; updatePolygon();
+  const showCropView = () => {
+    previewVersion += 1; wrap.classList.remove('processed-preview', 'preview-loading'); image.style.transform = ''; image.src = page.original;
+    editorStatus.textContent = 'Crop mode · drag corners to fit the paper'; updatePolygon();
+  };
+  const renderFilterPreview = async (selectedFilter) => {
+    const version = ++previewVersion; const label = filters.find(([key]) => key === selectedFilter)?.[1] || selectedFilter;
+    wrap.classList.add('processed-preview', 'preview-loading'); editorStatus.textContent = `Previewing ${label}…`;
+    try {
+      const preview = await processPage(page.original, corners, selectedFilter, rotation, 1050);
+      if (version !== previewVersion || !layer.isConnected) return;
+      image.style.transform = ''; image.src = preview; wrap.classList.remove('preview-loading'); editorStatus.textContent = `${label} preview · this is what will be saved`;
+    } catch (error) { console.error(error); if (version === previewVersion) { showCropView(); notify('This filter could not be previewed.'); } }
+  };
+  image.onload = () => { if (!wrap.classList.contains('processed-preview')) updatePolygon(); }; updatePolygon();
   layer.querySelectorAll('.crop-handle').forEach((handle) => {
     handle.addEventListener('pointerdown', (event) => {
       event.preventDefault(); handle.setPointerCapture(event.pointerId);
@@ -351,13 +378,16 @@ function showEditor(id) {
   });
   layer.querySelector('[data-cancel]').onclick = () => closeModal(layer);
   layer.querySelector('[data-detect]').onclick = async () => {
+    showCropView();
     const button = layer.querySelector('[data-detect]'); button.disabled = true; button.querySelector('span').textContent = 'Detecting…';
     const detected = await detectDocument(page.original).catch(() => null); button.disabled = false; button.querySelector('span').textContent = 'Auto crop';
     if (!detected) return notify('No clear page edges found. You can still drag the corners.');
-    corners = detected; layer.querySelectorAll('.crop-handle').forEach((handle, index) => { handle.style.left = `${corners[index].x * 100}%`; handle.style.top = `${corners[index].y * 100}%`; }); updatePolygon(); notify('Page edges detected');
+    corners = detected; page.autoCropped = true; layer.querySelectorAll('.crop-handle').forEach((handle, index) => { handle.style.left = `${corners[index].x * 100}%`; handle.style.top = `${corners[index].y * 100}%`; }); updatePolygon(); notify('Edges found — perspective will be straightened');
   };
-  layer.querySelector('[data-rotate]').onclick = () => { rotation = (rotation + 90) % 360; image.style.transform = `rotate(${rotation - page.rotation}deg)`; };
-  layer.querySelectorAll('[data-filter]').forEach((button) => button.onclick = () => { filter = button.dataset.filter; layer.querySelectorAll('[data-filter]').forEach((item) => item.classList.toggle('active', item === button)); });
+  layer.querySelector('[data-rotate]').onclick = () => { rotation = (rotation + 90) % 360; renderFilterPreview(filter); };
+  layer.querySelectorAll('[data-filter]').forEach((button) => button.onclick = () => {
+    filter = button.dataset.filter; layer.querySelectorAll('[data-filter]').forEach((item) => item.classList.toggle('active', item === button)); renderFilterPreview(filter);
+  });
   layer.querySelector('[data-save]').onclick = async () => {
     closeModal(layer); setBusy(true, 'Polishing your page…');
     try { page.corners = corners; page.rotation = rotation; page.filter = filter; page.processed = await processPage(page.original, corners, filter, rotation); page.thumbnail = await makeThumbnail(page.processed); await persistCurrent(); renderDocument(); notify('Page updated'); }
@@ -413,6 +443,8 @@ function showTextResult(text) {
 async function init() {
   try { state.documents = await listDocuments(); } catch (error) { console.warn('Local storage unavailable', error); }
   renderLibrary();
+  const warmScanner = () => prepareDetector().catch((error) => console.warn('Scanner warm-up failed', error));
+  if ('requestIdleCallback' in window) window.requestIdleCallback(warmScanner, { timeout: 2500 }); else setTimeout(warmScanner, 900);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(console.warn);
   if (new URLSearchParams(location.search).has('scan')) setTimeout(openCamera, 350);
 }

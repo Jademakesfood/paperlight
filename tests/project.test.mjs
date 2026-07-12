@@ -36,5 +36,9 @@ test('scanner includes live camera, automatic edge detection and scan modes', as
   assert.match(main, /detectDocument/);
   assert.match(detector, /findContours/);
   assert.match(detector, /approxPolyDP/);
+  assert.match(detector, /adaptiveThreshold/);
+  assert.match(detector, /convexHull/);
+  assert.match(main, /renderFilterPreview/);
+  assert.match(main, /missedFrames/);
   for (const mode of ['shadow', 'lighten', 'enhance', 'eco', 'gray', 'bw', 'invert']) assert.match(scanner, new RegExp(`mode === '${mode}'`));
 });

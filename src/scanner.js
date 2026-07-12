@@ -84,7 +84,7 @@ function applyPixelFilter(canvas, filter) {
   const data = imageData.data;
   const mode = filter === 'magic' ? 'auto' : filter;
   let illumination;
-  if (mode === 'shadow' || mode === 'bw') {
+  if (mode === 'shadow' || mode === 'bw' || mode === 'auto') {
     const grayValues = new Uint8Array(canvas.width * canvas.height);
     for (let i = 0, p = 0; i < data.length; i += 4, p += 1) grayValues[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
     illumination = boxBlurGray(grayValues, canvas.width, canvas.height, Math.max(12, Math.round(Math.min(canvas.width, canvas.height) / 38)));
@@ -96,24 +96,28 @@ function applyPixelFilter(canvas, filter) {
       const v = Math.max(0, Math.min(255, (gray - 128) * 1.18 + 145));
       data[i] = data[i + 1] = data[i + 2] = v;
     } else if (mode === 'bw') {
-      const v = gray > light - 13 ? 255 : gray < light - 52 ? 0 : (gray - light + 52) * 6.54;
+      const v = gray > light - 8 ? 255 : gray < light - 38 ? 0 : (gray - light + 38) * 8.5;
       data[i] = data[i + 1] = data[i + 2] = v;
     } else if (mode === 'shadow') {
-      const v = Math.max(0, Math.min(255, (gray / Math.max(35, light)) * 232));
-      data[i] = data[i + 1] = data[i + 2] = (v - 128) * 1.22 + 142;
+      const factor = 242 / Math.max(38, light);
+      data[i] = Math.max(0, Math.min(255, (data[i] * factor - 120) * 1.22 + 145));
+      data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] * factor - 120) * 1.22 + 145));
+      data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] * factor - 120) * 1.22 + 145));
     } else if (mode === 'invert') {
       data[i] = 255 - data[i]; data[i + 1] = 255 - data[i + 1]; data[i + 2] = 255 - data[i + 2];
     } else if (mode === 'lighten') {
-      data[i] = Math.min(255, data[i] * 1.08 + 22); data[i + 1] = Math.min(255, data[i + 1] * 1.08 + 22); data[i + 2] = Math.min(255, data[i + 2] * 1.08 + 22);
+      data[i] = Math.min(255, data[i] * 1.12 + 34); data[i + 1] = Math.min(255, data[i + 1] * 1.12 + 34); data[i + 2] = Math.min(255, data[i + 2] * 1.12 + 34);
     } else if (mode === 'enhance') {
-      data[i] = Math.max(0, Math.min(255, (data[i] - 118) * 1.3 + 140)); data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - 118) * 1.3 + 140)); data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - 118) * 1.3 + 140));
+      data[i] = Math.max(0, Math.min(255, (data[i] - 112) * 1.48 + 142)); data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - 112) * 1.48 + 142)); data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - 112) * 1.48 + 142));
     } else if (mode === 'eco') {
       const v = Math.max(0, Math.min(255, (gray - 128) * 0.95 + 151)); data[i] = data[i + 1] = data[i + 2] = v;
     } else if (mode === 'auto') {
+      const factor = Math.max(.72, Math.min(1.55, 226 / Math.max(45, light)));
       const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      data[i] = Math.max(0, Math.min(255, (data[i] - avg) * 1.12 + (avg - 116) * 1.16 + 143));
-      data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - avg) * 1.08 + (avg - 116) * 1.16 + 143));
-      data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - avg) * 1.02 + (avg - 116) * 1.16 + 140));
+      const balanced = avg * factor;
+      data[i] = Math.max(0, Math.min(255, (data[i] - avg) * 1.18 + (balanced - 116) * 1.24 + 146));
+      data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - avg) * 1.12 + (balanced - 116) * 1.24 + 146));
+      data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - avg) * 1.06 + (balanced - 116) * 1.24 + 143));
     }
   }
   ctx.putImageData(imageData, 0, 0);
