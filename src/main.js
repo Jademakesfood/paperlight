@@ -1,7 +1,7 @@
 import './styles.css';
 import { icon } from './icons.js';
 import { defaultCorners, fileToDataUrl, makeThumbnail, processPage } from './scanner.js';
-import { detectDocument, prepareDetector } from './detector.js';
+import { detectDocument, detectDocumentDetailed, prepareDetector } from './detector.js';
 import { listDocuments, removeDocument, saveDocument } from './storage.js';
 import { exportImages, exportPdf, exportWord } from './exporters.js';
 
@@ -85,7 +85,7 @@ async function openCamera() {
     </section>`, 'camera-layer');
   const video = layer.querySelector('video'); const overlay = layer.querySelector('canvas'); const frame = layer.querySelector('.camera-frame');
   const status = layer.querySelector('[data-camera-status]'); const indicator = layer.querySelector('[data-detected]');
-  let stream; let timer; let detecting = false; let latestCorners = null; let missedFrames = 0; let closed = false;
+  let stream; let timer; let detecting = false; let latestCorners = null; let latestConfidence = 0; let missedFrames = 0; let closed = false;
   const stop = () => { closed = true; clearInterval(timer); stream?.getTracks().forEach((track) => track.stop()); };
   const close = () => { stop(); closeModal(layer); };
   const drawCorners = (corners) => {
@@ -99,13 +99,15 @@ async function openCamera() {
     if (closed || detecting || video.readyState < 2) return;
     detecting = true;
     try {
-      const detected = await detectDocument(video, 680);
+      const result = await detectDocumentDetailed(video, 720); const detected = result?.corners;
       if (detected) {
         latestCorners = latestCorners ? detected.map((point, index) => ({ x: latestCorners[index].x * .58 + point.x * .42, y: latestCorners[index].y * .58 + point.y * .42 })) : detected;
+        latestConfidence = latestConfidence ? latestConfidence * .58 + result.confidence * .42 : result.confidence;
         missedFrames = 0;
-      } else if (++missedFrames >= 3) latestCorners = null;
+      } else if (++missedFrames >= 4) { latestCorners = null; latestConfidence = 0; }
       drawCorners(latestCorners);
-      status.textContent = latestCorners ? 'Document detected' : 'Move closer and keep the edges visible';
+      status.textContent = latestCorners ? `Document detected · ${Math.round(latestConfidence * 100)}%` : 'Move closer and keep the edges visible';
+      frame.querySelector('.camera-guide').textContent = latestCorners ? 'Edges locked · tap the shutter' : 'Point at a document';
       indicator.classList.toggle('ready', Boolean(latestCorners)); indicator.querySelector('span').textContent = latestCorners ? 'Ready' : 'Searching';
     } catch (error) { console.warn(error); } finally { detecting = false; }
   };
@@ -134,7 +136,7 @@ async function openCamera() {
     status.textContent = 'Edge detector could not load'; indicator.querySelector('span').textContent = 'Capture manually';
     return;
   }
-  status.textContent = 'Finding the document edges…'; await analyze(); timer = setInterval(analyze, 560);
+  status.textContent = 'Finding the document edges…'; await analyze(); timer = setInterval(analyze, 420);
 }
 
 async function createDemoDocument() {
@@ -245,7 +247,7 @@ function renderDocument() {
 
   renderShell(`
     <header class="document-header">
-      <button class="back-button" data-back>${icon('back')} <span>Library</span></button>
+      <button class="back-button" data-back aria-label="Back to library">${icon('back')} <span>Library</span></button>
       <div class="doc-title-wrap">
         <input class="doc-title" value="${doc.name.replace(/"/g, '&quot;')}" aria-label="Document name">
         <span>${doc.pages.length} ${doc.pages.length === 1 ? 'page' : 'pages'} · saved locally</span>
@@ -339,7 +341,7 @@ function showEditor(id) {
   const filters = [['original', 'Original'], ['auto', 'Auto'], ['shadow', 'No shadow'], ['lighten', 'Lighten'], ['enhance', 'Enhance'], ['eco', 'Eco'], ['gray', 'Grayscale'], ['bw', 'B&W'], ['invert', 'Invert']];
   const layer = modal(`
     <section class="editor-modal">
-      <header><button class="back-button" data-cancel>${icon('close')} <span>Cancel</span></button><div><strong>Edit page</strong><small data-editor-status>Crop mode · drag corners to fit the paper</small></div><button class="primary-button compact" data-save>${icon('check')} Save</button></header>
+      <header><button class="back-button" data-cancel aria-label="Cancel editing">${icon('close')} <span>Cancel</span></button><div><strong>Edit page</strong><small data-editor-status>Crop mode · drag corners to fit the paper</small></div><button class="primary-button compact" data-save>${icon('check')} Save</button></header>
       <div class="editor-stage"><div class="crop-wrap"><img src="${page.original}" alt="Document page"><span class="editor-preview-loading"><i class="spinner"></i>Applying filter…</span><svg class="crop-shade" preserveAspectRatio="none"><polygon></polygon></svg>${page.corners.map((point, index) => `<button class="crop-handle" data-corner="${index}" style="left:${point.x * 100}%;top:${point.y * 100}%" aria-label="Crop corner ${index + 1}"></button>`).join('')}</div></div>
       <div class="editor-controls">
         <button class="rotate-control" data-detect>${icon('scan')}<span>Auto crop</span></button><button class="rotate-control" data-rotate>${icon('rotate')}<span>Rotate</span></button>
