@@ -38,7 +38,24 @@ test('scanner includes live camera, automatic edge detection and scan modes', as
   assert.match(detector, /approxPolyDP/);
   assert.match(detector, /adaptiveThreshold/);
   assert.match(detector, /convexHull/);
+  assert.match(detector, /equalizeHist/);
+  assert.match(detector, /detectDocumentDetailed/);
+  assert.match(scanner, /getPerspectiveTransform/);
+  assert.match(scanner, /warpPerspective/);
   assert.match(main, /renderFilterPreview/);
   assert.match(main, /missedFrames/);
+  assert.match(main, /latestConfidence/);
   for (const mode of ['shadow', 'lighten', 'enhance', 'eco', 'gray', 'bw', 'invert']) assert.match(scanner, new RegExp(`mode === '${mode}'`));
+});
+
+test('mobile layout uses the visible viewport and prevents horizontal clipping', async () => {
+  const [styles, html] = await Promise.all([
+    readFile(new URL('../src/styles.css', import.meta.url), 'utf8'),
+    readFile(new URL('../index.html', import.meta.url), 'utf8'),
+  ]);
+  assert.match(html, /interactive-widget=resizes-content/);
+  assert.match(styles, /height:\s*100dvh/);
+  assert.match(styles, /grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+  assert.match(styles, /max-width:\s*100vw/);
+  assert.match(styles, /overflow-x:\s*hidden/);
 });
