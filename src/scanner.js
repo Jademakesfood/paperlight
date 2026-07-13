@@ -1,3 +1,5 @@
+import { prepareDetector } from './detector.js';
+
 export const defaultCorners = () => [
   { x: 0.035, y: 0.035 }, { x: 0.965, y: 0.035 },
   { x: 0.965, y: 0.965 }, { x: 0.035, y: 0.965 },
@@ -56,6 +58,44 @@ function drawTriangle(ctx, image, source, destination) {
   ctx.restore();
 }
 
+function meshWarp(image, sourcePoints, width, height) {
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
+  const steps = 18;
+  for (let y = 0; y < steps; y += 1) {
+    for (let x = 0; x < steps; x += 1) {
+      const u0 = x / steps; const u1 = (x + 1) / steps; const v0 = y / steps; const v1 = (y + 1) / steps;
+      const s00 = bilinear(sourcePoints, u0, v0); const s10 = bilinear(sourcePoints, u1, v0);
+      const s11 = bilinear(sourcePoints, u1, v1); const s01 = bilinear(sourcePoints, u0, v1);
+      const d00 = { x: u0 * width - 0.5, y: v0 * height - 0.5 }; const d10 = { x: u1 * width + 0.5, y: v0 * height - 0.5 };
+      const d11 = { x: u1 * width + 0.5, y: v1 * height + 0.5 }; const d01 = { x: u0 * width - 0.5, y: v1 * height + 0.5 };
+      drawTriangle(ctx, image, [s00, s10, s11], [d00, d10, d11]); drawTriangle(ctx, image, [s00, s11, s01], [d00, d11, d01]);
+    }
+  }
+  return canvas;
+}
+
+async function projectiveWarp(image, sourcePoints, width, height, outputScale) {
+  const cv = await prepareDetector(); const padding = Math.max(2, 5 / Math.max(.05, outputScale));
+  const left = Math.max(0, Math.floor(Math.min(...sourcePoints.map((point) => point.x)) - padding));
+  const top = Math.max(0, Math.floor(Math.min(...sourcePoints.map((point) => point.y)) - padding));
+  const right = Math.min(image.naturalWidth, Math.ceil(Math.max(...sourcePoints.map((point) => point.x)) + padding));
+  const bottom = Math.min(image.naturalHeight, Math.ceil(Math.max(...sourcePoints.map((point) => point.y)) + padding));
+  const cropWidth = Math.max(1, right - left); const cropHeight = Math.max(1, bottom - top);
+  const input = document.createElement('canvas'); input.width = Math.max(1, Math.round(cropWidth * outputScale)); input.height = Math.max(1, Math.round(cropHeight * outputScale));
+  const inputContext = input.getContext('2d', { alpha: false }); inputContext.imageSmoothingEnabled = true; inputContext.imageSmoothingQuality = 'high';
+  inputContext.drawImage(image, left, top, cropWidth, cropHeight, 0, 0, input.width, input.height);
+  const adjusted = sourcePoints.flatMap((point) => [(point.x - left) * outputScale, (point.y - top) * outputScale]);
+  const source = cv.imread(input); const destination = new cv.Mat();
+  const sourceQuad = cv.matFromArray(4, 1, cv.CV_32FC2, adjusted);
+  const destinationQuad = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, width - 1, 0, width - 1, height - 1, 0, height - 1]);
+  const transform = cv.getPerspectiveTransform(sourceQuad, destinationQuad); const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  try {
+    cv.warpPerspective(source, destination, transform, new cv.Size(width, height), cv.INTER_CUBIC, cv.BORDER_REPLICATE, new cv.Scalar(255, 255, 255, 255));
+    cv.imshow(canvas, destination); return canvas;
+  } finally { source.delete(); destination.delete(); sourceQuad.delete(); destinationQuad.delete(); transform.delete(); }
+}
+
 function boxBlurGray(values, width, height, radius = 24) {
   const horizontal = new Float32Array(values.length); const output = new Float32Array(values.length);
   for (let y = 0; y < height; y += 1) {
@@ -77,47 +117,58 @@ function boxBlurGray(values, width, height, radius = 24) {
   return output;
 }
 
+const clampByte = (value) => Math.max(0, Math.min(255, value));
+
+function grayLevels(values) {
+  const histogram = new Uint32Array(256);
+  for (let index = 0; index < values.length; index += 1) histogram[values[index]] += 1;
+  const at = (ratio) => {
+    const target = values.length * ratio; let count = 0;
+    for (let value = 0; value < 256; value += 1) { count += histogram[value]; if (count >= target) return value; }
+    return 255;
+  };
+  const low = at(.015); const high = at(.985);
+  return high - low < 45 ? { low: Math.max(0, low - 24), high: Math.min(255, high + 24) } : { low, high };
+}
+
 function applyPixelFilter(canvas, filter) {
   if (filter === 'color' || filter === 'original') return;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const data = imageData.data;
   const mode = filter === 'magic' ? 'auto' : filter;
-  let illumination;
-  if (mode === 'shadow' || mode === 'bw' || mode === 'auto') {
-    const grayValues = new Uint8Array(canvas.width * canvas.height);
-    for (let i = 0, p = 0; i < data.length; i += 4, p += 1) grayValues[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    illumination = boxBlurGray(grayValues, canvas.width, canvas.height, Math.max(12, Math.round(Math.min(canvas.width, canvas.height) / 38)));
-  }
-  for (let i = 0; i < data.length; i += 4) {
+  const grayValues = new Uint8Array(canvas.width * canvas.height);
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) grayValues[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  const { low, high } = grayLevels(grayValues); const range = Math.max(32, high - low);
+  const needsIllumination = mode === 'shadow' || mode === 'bw' || mode === 'auto';
+  const needsDetail = mode === 'shadow' || mode === 'bw' || mode === 'auto' || mode === 'enhance' || mode === 'gray';
+  const illumination = needsIllumination ? boxBlurGray(grayValues, canvas.width, canvas.height, Math.max(14, Math.round(Math.min(canvas.width, canvas.height) / 34))) : null;
+  const detailBase = needsDetail ? boxBlurGray(grayValues, canvas.width, canvas.height, 1) : null;
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
     const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    const light = illumination?.[i / 4] || 128;
+    const light = illumination?.[p] || 220; const detail = detailBase ? gray - detailBase[p] : 0;
+    const leveled = clampByte((gray - low) * 255 / range); const local = clampByte(gray * 238 / Math.max(38, light));
     if (mode === 'gray') {
-      const v = Math.max(0, Math.min(255, (gray - 128) * 1.18 + 145));
+      const v = clampByte((leveled - 128) * 1.06 + 139 + detail * .72);
       data[i] = data[i + 1] = data[i + 2] = v;
     } else if (mode === 'bw') {
-      const v = gray > light - 8 ? 255 : gray < light - 38 ? 0 : (gray - light + 38) * 8.5;
+      const v = clampByte((gray - light + 40 + detail * .45) * 8.5);
       data[i] = data[i + 1] = data[i + 2] = v;
     } else if (mode === 'shadow') {
-      const factor = 242 / Math.max(38, light);
-      data[i] = Math.max(0, Math.min(255, (data[i] * factor - 120) * 1.22 + 145));
-      data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] * factor - 120) * 1.22 + 145));
-      data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] * factor - 120) * 1.22 + 145));
+      const target = clampByte((local - 128) * 1.12 + 151 + detail * .38); const delta = target - gray;
+      data[i] = clampByte(data[i] + delta); data[i + 1] = clampByte(data[i + 1] + delta); data[i + 2] = clampByte(data[i + 2] + delta);
     } else if (mode === 'invert') {
       data[i] = 255 - data[i]; data[i + 1] = 255 - data[i + 1]; data[i + 2] = 255 - data[i + 2];
     } else if (mode === 'lighten') {
-      data[i] = Math.min(255, data[i] * 1.12 + 34); data[i + 1] = Math.min(255, data[i + 1] * 1.12 + 34); data[i + 2] = Math.min(255, data[i + 2] * 1.12 + 34);
+      data[i] = clampByte(data[i] * 1.1 + 31); data[i + 1] = clampByte(data[i + 1] * 1.1 + 31); data[i + 2] = clampByte(data[i + 2] * 1.1 + 31);
     } else if (mode === 'enhance') {
-      data[i] = Math.max(0, Math.min(255, (data[i] - 112) * 1.48 + 142)); data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - 112) * 1.48 + 142)); data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - 112) * 1.48 + 142));
+      const target = clampByte((leveled - 128) * 1.18 + 137 + detail * .9); const delta = target - gray; const average = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      data[i] = clampByte(data[i] + delta + (data[i] - average) * .08); data[i + 1] = clampByte(data[i + 1] + delta + (data[i + 1] - average) * .08); data[i + 2] = clampByte(data[i + 2] + delta + (data[i + 2] - average) * .08);
     } else if (mode === 'eco') {
-      const v = Math.max(0, Math.min(255, (gray - 128) * 0.95 + 151)); data[i] = data[i + 1] = data[i + 2] = v;
+      const v = clampByte((leveled - 128) * .88 + 154); data[i] = data[i + 1] = data[i + 2] = v;
     } else if (mode === 'auto') {
-      const factor = Math.max(.72, Math.min(1.55, 226 / Math.max(45, light)));
-      const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      const balanced = avg * factor;
-      data[i] = Math.max(0, Math.min(255, (data[i] - avg) * 1.18 + (balanced - 116) * 1.24 + 146));
-      data[i + 1] = Math.max(0, Math.min(255, (data[i + 1] - avg) * 1.12 + (balanced - 116) * 1.24 + 146));
-      data[i + 2] = Math.max(0, Math.min(255, (data[i + 2] - avg) * 1.06 + (balanced - 116) * 1.24 + 143));
+      const target = clampByte((local - 128) * 1.19 + 145 + detail * .62); const delta = target - gray; const average = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      data[i] = clampByte(data[i] + delta + (data[i] - average) * .045); data[i + 1] = clampByte(data[i + 1] + delta + (data[i + 1] - average) * .045); data[i + 2] = clampByte(data[i + 2] + delta + (data[i + 2] - average) * .045);
     }
   }
   ctx.putImageData(imageData, 0, 0);
@@ -132,27 +183,9 @@ export async function processPage(source, corners = defaultCorners(), filter = '
   width = Math.max(1, Math.round(width * scale));
   height = Math.max(1, Math.round(height * scale));
 
-  const warped = document.createElement('canvas');
-  warped.width = width;
-  warped.height = height;
-  const ctx = warped.getContext('2d');
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(0, 0, width, height);
-  const steps = 14;
-  for (let y = 0; y < steps; y += 1) {
-    for (let x = 0; x < steps; x += 1) {
-      const u0 = x / steps; const u1 = (x + 1) / steps;
-      const v0 = y / steps; const v1 = (y + 1) / steps;
-      const s00 = bilinear(sourcePoints, u0, v0); const s10 = bilinear(sourcePoints, u1, v0);
-      const s11 = bilinear(sourcePoints, u1, v1); const s01 = bilinear(sourcePoints, u0, v1);
-      const d00 = { x: u0 * width - 0.5, y: v0 * height - 0.5 };
-      const d10 = { x: u1 * width + 0.5, y: v0 * height - 0.5 };
-      const d11 = { x: u1 * width + 0.5, y: v1 * height + 0.5 };
-      const d01 = { x: u0 * width - 0.5, y: v1 * height + 0.5 };
-      drawTriangle(ctx, image, [s00, s10, s11], [d00, d10, d11]);
-      drawTriangle(ctx, image, [s00, s11, s01], [d00, d11, d01]);
-    }
-  }
+  let warped;
+  try { warped = await projectiveWarp(image, sourcePoints, width, height, scale); }
+  catch (error) { console.warn('Perspective engine unavailable; using compatibility warp', error); warped = meshWarp(image, sourcePoints, width, height); }
   applyPixelFilter(warped, filter);
 
   const turns = ((rotation % 360) + 360) % 360;
