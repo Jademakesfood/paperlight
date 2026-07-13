@@ -58,4 +58,5 @@ test('mobile layout uses the visible viewport and prevents horizontal clipping',
   assert.match(styles, /grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   assert.match(styles, /max-width:\s*100vw/);
   assert.match(styles, /overflow-x:\s*hidden/);
+  assert.match(styles, /max-height:\s*calc\(min\(58dvh,\s*440px\)\s*-\s*28px\)/);
 });
