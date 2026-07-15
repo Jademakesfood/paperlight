@@ -39,9 +39,18 @@ test('scanner includes live camera, automatic edge detection and scan modes', as
   assert.match(detector, /adaptiveThreshold/);
   assert.match(detector, /convexHull/);
   assert.match(detector, /equalizeHist/);
+  assert.match(detector, /HoughLinesP/);
+  assert.match(detector, /rankWithConsensus/);
+  assert.match(detector, /quadGeometry/);
+  assert.match(detector, /paperContrast/);
+  assert.match(detector, /frameLike/);
   assert.match(detector, /detectDocumentDetailed/);
   assert.match(scanner, /getPerspectiveTransform/);
   assert.match(scanner, /warpPerspective/);
+  assert.match(scanner, /normalizeIllumination/);
+  assert.match(scanner, /adaptiveThreshold/);
+  assert.match(scanner, /equalizeHist/);
+  assert.match(scanner, /addWeighted/);
   assert.match(main, /renderFilterPreview/);
   assert.match(main, /missedFrames/);
   assert.match(main, /latestConfidence/);
