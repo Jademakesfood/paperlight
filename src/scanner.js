@@ -96,82 +96,110 @@ async function projectiveWarp(image, sourcePoints, width, height, outputScale) {
   } finally { source.delete(); destination.delete(); sourceQuad.delete(); destinationQuad.delete(); transform.delete(); }
 }
 
-function boxBlurGray(values, width, height, radius = 24) {
-  const horizontal = new Float32Array(values.length); const output = new Float32Array(values.length);
-  for (let y = 0; y < height; y += 1) {
-    let sum = 0;
-    for (let x = -radius; x <= radius; x += 1) sum += values[y * width + Math.max(0, Math.min(width - 1, x))];
-    for (let x = 0; x < width; x += 1) {
-      horizontal[y * width + x] = sum / (radius * 2 + 1);
-      sum += values[y * width + Math.min(width - 1, x + radius + 1)] - values[y * width + Math.max(0, x - radius)];
-    }
-  }
-  for (let x = 0; x < width; x += 1) {
-    let sum = 0;
-    for (let y = -radius; y <= radius; y += 1) sum += horizontal[Math.max(0, Math.min(height - 1, y)) * width + x];
-    for (let y = 0; y < height; y += 1) {
-      output[y * width + x] = sum / (radius * 2 + 1);
-      sum += horizontal[Math.min(height - 1, y + radius + 1) * width + x] - horizontal[Math.max(0, y - radius) * width + x];
-    }
-  }
-  return output;
+function oddBlockSize(width, height, divisor = 28) {
+  const smallest = Math.min(width, height);
+  let size = Math.max(15, Math.min(71, Math.round(smallest / divisor)));
+  if (size % 2 === 0) size += 1;
+  const maximum = Math.max(3, (smallest - 1) | 1);
+  return Math.max(3, Math.min(size, maximum));
 }
 
-const clampByte = (value) => Math.max(0, Math.min(255, value));
-
-function grayLevels(values) {
-  const histogram = new Uint32Array(256);
-  for (let index = 0; index < values.length; index += 1) histogram[values[index]] += 1;
-  const at = (ratio) => {
-    const target = values.length * ratio; let count = 0;
-    for (let value = 0; value < 256; value += 1) { count += histogram[value]; if (count >= target) return value; }
-    return 255;
-  };
-  const low = at(.015); const high = at(.985);
-  return high - low < 45 ? { low: Math.max(0, low - 24), high: Math.min(255, high + 24) } : { low, high };
+function normalizeIllumination(cv, lightness, destination) {
+  const scale = Math.min(1, 280 / Math.max(lightness.cols, lightness.rows));
+  const small = new cv.Mat(); const background = new cv.Mat(); const fullBackground = new cv.Mat();
+  const closeKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(7, 7));
+  try {
+    cv.resize(lightness, small, new cv.Size(Math.max(1, Math.round(lightness.cols * scale)), Math.max(1, Math.round(lightness.rows * scale))), 0, 0, cv.INTER_AREA);
+    cv.morphologyEx(small, background, cv.MORPH_CLOSE, closeKernel, new cv.Point(-1, -1), 2);
+    const blurSize = oddBlockSize(background.cols, background.rows, 7);
+    cv.GaussianBlur(background, background, new cv.Size(blurSize, blurSize), 0, 0, cv.BORDER_REPLICATE);
+    cv.resize(background, fullBackground, new cv.Size(lightness.cols, lightness.rows), 0, 0, cv.INTER_CUBIC);
+    cv.divide(lightness, fullBackground, destination, 238);
+  } finally { small.delete(); background.delete(); fullBackground.delete(); closeKernel.delete(); }
 }
 
-function applyPixelFilter(canvas, filter) {
-  if (filter === 'color' || filter === 'original') return;
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const data = imageData.data;
+function sharpen(cv, source, destination, strength = .55, lift = 2) {
+  const blurred = new cv.Mat();
+  try {
+    cv.GaussianBlur(source, blurred, new cv.Size(0, 0), 1.15, 1.15, cv.BORDER_REPLICATE);
+    cv.addWeighted(source, 1 + strength, blurred, -strength, lift, destination);
+  } finally { blurred.delete(); }
+}
+
+function adjustLightness(cv, rgb, destination, operation) {
+  const lab = new cv.Mat(); const channels = new cv.MatVector(); const mergedChannels = new cv.MatVector(); const merged = new cv.Mat();
+  let lightness; let firstColor; let secondColor; const adjusted = new cv.Mat();
+  try {
+    cv.cvtColor(rgb, lab, cv.COLOR_RGB2Lab); cv.split(lab, channels);
+    lightness = channels.get(0); firstColor = channels.get(1); secondColor = channels.get(2);
+    operation(lightness, adjusted);
+    mergedChannels.push_back(adjusted); mergedChannels.push_back(firstColor); mergedChannels.push_back(secondColor);
+    cv.merge(mergedChannels, merged); cv.cvtColor(merged, destination, cv.COLOR_Lab2RGB);
+  } finally {
+    lab.delete(); channels.delete(); mergedChannels.delete(); merged.delete(); adjusted.delete();
+    lightness?.delete(); firstColor?.delete(); secondColor?.delete();
+  }
+}
+
+function adaptivePaperThreshold(cv, source, destination, contrast = 11) {
+  const smoothed = new cv.Mat(); const detailed = new cv.Mat();
+  try {
+    cv.medianBlur(source, smoothed, 3); sharpen(cv, smoothed, detailed, .48, 1);
+    cv.adaptiveThreshold(detailed, destination, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, oddBlockSize(source.cols, source.rows), contrast);
+  } finally { smoothed.delete(); detailed.delete(); }
+}
+
+export async function applyScannerFilter(canvas, filter) {
   const mode = filter === 'magic' ? 'auto' : filter;
-  const grayValues = new Uint8Array(canvas.width * canvas.height);
-  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) grayValues[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-  const { low, high } = grayLevels(grayValues); const range = Math.max(32, high - low);
-  const needsIllumination = mode === 'shadow' || mode === 'bw' || mode === 'auto';
-  const needsDetail = mode === 'shadow' || mode === 'bw' || mode === 'auto' || mode === 'enhance' || mode === 'gray';
-  const illumination = needsIllumination ? boxBlurGray(grayValues, canvas.width, canvas.height, Math.max(14, Math.round(Math.min(canvas.width, canvas.height) / 34))) : null;
-  const detailBase = needsDetail ? boxBlurGray(grayValues, canvas.width, canvas.height, 1) : null;
-  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
-    const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-    const light = illumination?.[p] || 220; const detail = detailBase ? gray - detailBase[p] : 0;
-    const leveled = clampByte((gray - low) * 255 / range); const local = clampByte(gray * 238 / Math.max(38, light));
-    if (mode === 'gray') {
-      const v = clampByte((leveled - 128) * 1.06 + 139 + detail * .72);
-      data[i] = data[i + 1] = data[i + 2] = v;
-    } else if (mode === 'bw') {
-      const v = clampByte((gray - light + 40 + detail * .45) * 8.5);
-      data[i] = data[i + 1] = data[i + 2] = v;
-    } else if (mode === 'shadow') {
-      const target = clampByte((local - 128) * 1.12 + 151 + detail * .38); const delta = target - gray;
-      data[i] = clampByte(data[i] + delta); data[i + 1] = clampByte(data[i + 1] + delta); data[i + 2] = clampByte(data[i + 2] + delta);
-    } else if (mode === 'invert') {
-      data[i] = 255 - data[i]; data[i + 1] = 255 - data[i + 1]; data[i + 2] = 255 - data[i + 2];
+  if (mode === 'color' || mode === 'original') return canvas;
+  const cv = await prepareDetector(); const source = cv.imread(canvas); const rgb = new cv.Mat(); const output = new cv.Mat(); const shown = new cv.Mat();
+  try {
+    cv.cvtColor(source, rgb, cv.COLOR_RGBA2RGB);
+    if (mode === 'invert') {
+      cv.bitwise_not(rgb, output);
     } else if (mode === 'lighten') {
-      data[i] = clampByte(data[i] * 1.1 + 31); data[i + 1] = clampByte(data[i + 1] * 1.1 + 31); data[i + 2] = clampByte(data[i + 2] * 1.1 + 31);
+      rgb.convertTo(output, -1, 1.06, 24);
+    } else if (mode === 'shadow') {
+      adjustLightness(cv, rgb, output, (lightness, adjusted) => {
+        const normalized = new cv.Mat();
+        try { normalizeIllumination(cv, lightness, normalized); cv.addWeighted(normalized, .9, lightness, .1, 4, adjusted); }
+        finally { normalized.delete(); }
+      });
     } else if (mode === 'enhance') {
-      const target = clampByte((leveled - 128) * 1.18 + 137 + detail * .9); const delta = target - gray; const average = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      data[i] = clampByte(data[i] + delta + (data[i] - average) * .08); data[i + 1] = clampByte(data[i + 1] + delta + (data[i + 1] - average) * .08); data[i + 2] = clampByte(data[i + 2] + delta + (data[i + 2] - average) * .08);
-    } else if (mode === 'eco') {
-      const v = clampByte((leveled - 128) * .88 + 154); data[i] = data[i + 1] = data[i + 2] = v;
+      adjustLightness(cv, rgb, output, (lightness, adjusted) => {
+        const equalized = new cv.Mat(); const balanced = new cv.Mat();
+        try { cv.equalizeHist(lightness, equalized); cv.addWeighted(lightness, .72, equalized, .28, 4, balanced); sharpen(cv, balanced, adjusted, .4, 2); }
+        finally { equalized.delete(); balanced.delete(); }
+      });
     } else if (mode === 'auto') {
-      const target = clampByte((local - 128) * 1.19 + 145 + detail * .62); const delta = target - gray; const average = (data[i] + data[i + 1] + data[i + 2]) / 3;
-      data[i] = clampByte(data[i] + delta + (data[i] - average) * .045); data[i + 1] = clampByte(data[i + 1] + delta + (data[i + 1] - average) * .045); data[i + 2] = clampByte(data[i + 2] + delta + (data[i + 2] - average) * .045);
+      adjustLightness(cv, rgb, output, (lightness, adjusted) => {
+        const normalized = new cv.Mat(); const balanced = new cv.Mat();
+        try {
+          normalizeIllumination(cv, lightness, normalized);
+          cv.addWeighted(normalized, .78, lightness, .22, 3, balanced); sharpen(cv, balanced, adjusted, .3, 1);
+        } finally { normalized.delete(); balanced.delete(); }
+      });
+    } else {
+      const gray = new cv.Mat(); const normalized = new cv.Mat();
+      try {
+        cv.cvtColor(rgb, gray, cv.COLOR_RGB2GRAY);
+        if (mode === 'gray') {
+          const equalized = new cv.Mat(); const balanced = new cv.Mat();
+          try { cv.equalizeHist(gray, equalized); cv.addWeighted(gray, .55, equalized, .45, 4, balanced); sharpen(cv, balanced, output, .48, 2); }
+          finally { equalized.delete(); balanced.delete(); }
+        } else if (mode === 'bw') {
+          normalizeIllumination(cv, gray, normalized); adaptivePaperThreshold(cv, normalized, output, 10);
+        } else if (mode === 'eco') {
+          const paper = new cv.Mat();
+          try { normalizeIllumination(cv, gray, normalized); adaptivePaperThreshold(cv, normalized, paper, 15); cv.addWeighted(normalized, .28, paper, .72, 5, output); }
+          finally { paper.delete(); }
+        } else gray.copyTo(output);
+        cv.cvtColor(output, shown, cv.COLOR_GRAY2RGBA);
+        cv.imshow(canvas, shown); return canvas;
+      } finally { gray.delete(); normalized.delete(); }
     }
-  }
-  ctx.putImageData(imageData, 0, 0);
+    cv.cvtColor(output, shown, cv.COLOR_RGB2RGBA); cv.imshow(canvas, shown); return canvas;
+  } finally { source.delete(); rgb.delete(); output.delete(); shown.delete(); }
 }
 
 export async function processPage(source, corners = defaultCorners(), filter = 'auto', rotation = 0, maxDimension = 1800) {
@@ -186,7 +214,7 @@ export async function processPage(source, corners = defaultCorners(), filter = '
   let warped;
   try { warped = await projectiveWarp(image, sourcePoints, width, height, scale); }
   catch (error) { console.warn('Perspective engine unavailable; using compatibility warp', error); warped = meshWarp(image, sourcePoints, width, height); }
-  applyPixelFilter(warped, filter);
+  await applyScannerFilter(warped, filter);
 
   const turns = ((rotation % 360) + 360) % 360;
   if (!turns) return warped.toDataURL('image/jpeg', 0.9);
