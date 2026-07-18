@@ -26,6 +26,20 @@ test('privacy-sensitive features use local browser APIs', async () => {
   assert.doesNotMatch(`${main}\n${storage}`, /fetch\(['"]https?:/);
 });
 
+test('the interface ships its own fonts instead of calling a font CDN', async () => {
+  const styles = await readFile(new URL('../src/styles.css', import.meta.url), 'utf8');
+  assert.doesNotMatch(styles, /fonts\.googleapis\.com|fonts\.gstatic\.com/);
+  assert.match(styles, /@font-face/);
+  assert.match(styles, /\.woff2/);
+});
+
+test('multi-page image export uses the global document, not the scan object', async () => {
+  const exporters = await readFile(new URL('../src/exporters.js', import.meta.url), 'utf8');
+  // The scan document was previously passed as a parameter named `document`,
+  // shadowing the DOM global and breaking the multi-page download fallback.
+  assert.doesNotMatch(exporters, /function exportImages\(document\)/);
+});
+
 test('scanner includes live camera, automatic edge detection and scan modes', async () => {
   const [main, detector, scanner] = await Promise.all([
     readFile(new URL('../src/main.js', import.meta.url), 'utf8'),
@@ -34,6 +48,10 @@ test('scanner includes live camera, automatic edge detection and scan modes', as
   ]);
   assert.match(main, /getUserMedia/);
   assert.match(main, /detectDocument/);
+  // The live viewfinder must use the lightweight detector so it stays smooth
+  // on a phone; the heavy consensus pipeline is only for the captured still.
+  assert.match(detector, /export async function detectDocumentLive/);
+  assert.match(main, /detectDocumentLive/);
   assert.match(detector, /findContours/);
   assert.match(detector, /approxPolyDP/);
   assert.match(detector, /adaptiveThreshold/);

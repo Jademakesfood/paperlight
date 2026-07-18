@@ -1,7 +1,7 @@
 import './styles.css';
 import { icon } from './icons.js';
 import { defaultCorners, fileToDataUrl, makeThumbnail, processPage } from './scanner.js';
-import { detectDocument, detectDocumentDetailed, prepareDetector } from './detector.js';
+import { detectDocument, detectDocumentLive, prepareDetector } from './detector.js';
 import { listDocuments, removeDocument, saveDocument } from './storage.js';
 import { exportImages, exportPdf, exportWord } from './exporters.js';
 
@@ -75,20 +75,31 @@ async function addFiles(files) {
 }
 
 async function openCamera() {
-  if (!navigator.mediaDevices?.getUserMedia) { notify('Live camera is unavailable in this browser. Opening the phone camera instead.'); return captureInput(true); }
+  // Live capture needs getUserMedia and a secure context; otherwise fall back
+  // to the operating system camera through a file input.
+  if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
+    notify(window.isSecureContext ? 'Live camera is unavailable in this browser. Opening the phone camera instead.' : 'Live camera needs a secure connection. Opening the phone camera instead.');
+    return captureInput(true);
+  }
   const detectorReady = prepareDetector().then(() => true).catch((error) => { console.warn('Detector unavailable', error); return false; });
   const layer = modal(`
     <section class="camera-modal">
-      <header><button class="camera-icon" data-close aria-label="Close camera">${icon('close')}</button><div><strong>Document scan</strong><small data-camera-status>Loading edge detector…</small></div><button class="camera-icon" data-gallery aria-label="Choose from photos">${icon('image')}</button></header>
-      <div class="camera-frame"><video playsinline muted></video><canvas></canvas><div class="camera-guide">Point at a document</div></div>
+      <header><button class="camera-icon" data-close aria-label="Close camera">${icon('close')}</button><div><strong>Document scan</strong><small data-camera-status>Starting camera…</small></div><button class="camera-icon" data-torch aria-label="Toggle flashlight" hidden>${icon('flash')}</button></header>
+      <div class="camera-frame"><video playsinline muted autoplay></video><canvas></canvas><div class="camera-guide">Point at a document</div><span class="camera-flash"></span></div>
       <footer><button class="camera-gallery" data-gallery>${icon('image')}<span>Photos</span></button><button class="shutter" data-shutter aria-label="Take photo"><span></span></button><div class="camera-detected" data-detected><i></i><span>Searching</span></div></footer>
     </section>`, 'camera-layer');
   const video = layer.querySelector('video'); const overlay = layer.querySelector('canvas'); const frame = layer.querySelector('.camera-frame');
   const status = layer.querySelector('[data-camera-status]'); const indicator = layer.querySelector('[data-detected]');
-  let stream; let timer; let detecting = false; let latestCorners = null; let latestConfidence = 0; let missedFrames = 0; let closed = false;
-  const stop = () => { closed = true; clearInterval(timer); stream?.getTracks().forEach((track) => track.stop()); };
+  const guide = frame.querySelector('.camera-guide'); const torchButton = layer.querySelector('[data-torch]'); const flashEl = frame.querySelector('.camera-flash');
+  let stream; let track; let timer; let detecting = false; let latestCorners = null; let latestConfidence = 0; let missedFrames = 0; let closed = false; let ready = false; let torchOn = false;
+  const stop = () => { closed = true; clearTimeout(timer); stream?.getTracks().forEach((mediaTrack) => mediaTrack.stop()); document.removeEventListener('keydown', onKey); };
   const close = () => { stop(); closeModal(layer); };
+  const onKey = (event) => { if (event.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  layer.addEventListener('click', (event) => { if (event.target === layer) close(); });
+  const sizeOverlay = () => { if (video.videoWidth && (overlay.width !== video.videoWidth || overlay.height !== video.videoHeight)) { overlay.width = video.videoWidth; overlay.height = video.videoHeight; } };
   const drawCorners = (corners) => {
+    sizeOverlay();
     const ctx = overlay.getContext('2d'); ctx.clearRect(0, 0, overlay.width, overlay.height);
     if (!corners) return;
     ctx.beginPath(); corners.forEach((point, index) => { const x = point.x * overlay.width; const y = point.y * overlay.height; if (!index) ctx.moveTo(x, y); else ctx.lineTo(x, y); });
@@ -96,47 +107,103 @@ async function openCamera() {
     ctx.shadowBlur = 0; ctx.fillStyle = '#27e097'; corners.forEach((point) => { ctx.beginPath(); ctx.arc(point.x * overlay.width, point.y * overlay.height, Math.max(7, overlay.width / 100), 0, Math.PI * 2); ctx.fill(); });
   };
   const analyze = async () => {
-    if (closed || detecting || video.readyState < 2) return;
+    if (closed || detecting || video.readyState < 2 || !video.videoWidth) return;
     detecting = true;
     try {
-      const result = await detectDocumentDetailed(video, 720); const detected = result?.corners;
+      const result = await detectDocumentLive(video, 520); const detected = result?.corners;
       if (detected) {
-        latestCorners = latestCorners ? detected.map((point, index) => ({ x: latestCorners[index].x * .58 + point.x * .42, y: latestCorners[index].y * .58 + point.y * .42 })) : detected;
-        latestConfidence = latestConfidence ? latestConfidence * .58 + result.confidence * .42 : result.confidence;
+        latestCorners = latestCorners ? detected.map((point, index) => ({ x: latestCorners[index].x * .55 + point.x * .45, y: latestCorners[index].y * .55 + point.y * .45 })) : detected;
+        latestConfidence = latestConfidence ? latestConfidence * .55 + result.confidence * .45 : result.confidence;
         missedFrames = 0;
       } else if (++missedFrames >= 4) { latestCorners = null; latestConfidence = 0; }
       drawCorners(latestCorners);
-      status.textContent = latestCorners ? `Document detected · ${Math.round(latestConfidence * 100)}%` : 'Move closer and keep the edges visible';
-      frame.querySelector('.camera-guide').textContent = latestCorners ? 'Edges locked · tap the shutter' : 'Point at a document';
+      status.textContent = latestCorners ? `Document detected · ${Math.round(latestConfidence * 100)}%` : 'Move closer and keep all edges in view';
+      guide.textContent = latestCorners ? 'Edges locked · tap the shutter' : 'Point at a document';
       indicator.classList.toggle('ready', Boolean(latestCorners)); indicator.querySelector('span').textContent = latestCorners ? 'Ready' : 'Searching';
     } catch (error) { console.warn(error); } finally { detecting = false; }
   };
+  const loop = async () => { if (closed) return; await analyze(); if (!closed) timer = setTimeout(loop, 190); };
+  const flash = () => { if (!flashEl) return; flashEl.classList.remove('fire'); void flashEl.offsetWidth; flashEl.classList.add('fire'); };
+  const capture = async () => {
+    if (!ready || video.readyState < 2 || !video.videoWidth) { notify('Hold steady — the camera is still starting.'); return; }
+    flash(); navigator.vibrate?.(15);
+    const shot = document.createElement('canvas'); shot.width = video.videoWidth; shot.height = video.videoHeight;
+    shot.getContext('2d', { alpha: false }).drawImage(video, 0, 0);
+    const original = shot.toDataURL('image/jpeg', 0.95);
+    const liveGuess = latestCorners ? latestCorners.map((point) => ({ ...point })) : null;
+    close(); setBusy(true, 'Finding the page and straightening…');
+    try {
+      // A fresh detection on the full-resolution still beats the smoothed
+      // preview corners; fall back to the live guess, then to a full-frame crop.
+      const detected = await detectDocument(original).catch(() => null);
+      await addPreparedPages([await preparePage(original, detected || liveGuess)]);
+    } catch (error) { console.error(error); notify('The photo could not be prepared.'); }
+    finally { setBusy(false); }
+  };
   layer.querySelector('[data-close]').onclick = close;
   layer.querySelectorAll('[data-gallery]').forEach((button) => button.onclick = () => { close(); captureInput(false); });
-  layer.querySelector('[data-shutter]').onclick = async () => {
-    if (video.readyState < 2) return;
-    const canvas = document.createElement('canvas'); canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0); const original = canvas.toDataURL('image/jpeg', .94); const corners = latestCorners;
-    close(); setBusy(true, corners ? 'Straightening the detected page…' : 'Finding and straightening the page…');
-    try { await addPreparedPages([await preparePage(original, corners)]); } catch (error) { console.error(error); notify('The photo could not be prepared.'); } finally { setBusy(false); }
+  layer.querySelector('[data-shutter]').onclick = capture;
+  torchButton.onclick = async () => {
+    if (!track) return;
+    torchOn = !torchOn;
+    try { await track.applyConstraints({ advanced: [{ torch: torchOn }] }); torchButton.classList.toggle('active', torchOn); }
+    catch (error) { console.warn('Torch unavailable', error); torchOn = false; torchButton.hidden = true; }
   };
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
-    if (closed) return stream.getTracks().forEach((track) => track.stop());
-    video.srcObject = stream; await video.play();
-    overlay.width = video.videoWidth; overlay.height = video.videoHeight;
-  } catch (error) {
-    console.warn('Live camera unavailable', error);
-    status.textContent = 'Camera permission is off'; frame.classList.add('camera-error');
-    frame.querySelector('.camera-guide').textContent = 'Allow Camera in Safari Settings, or tap Photos';
+
+  // Acquire the rear camera when possible, then relax the constraints so a
+  // front camera or any available device still lets the user scan.
+  const attempts = [
+    { audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } },
+    { audio: false, video: { facingMode: 'environment' } },
+    { audio: false, video: true },
+  ];
+  let lastError;
+  for (const constraints of attempts) {
+    try { stream = await navigator.mediaDevices.getUserMedia(constraints); break; }
+    catch (error) { lastError = error; if (error.name === 'NotAllowedError' || error.name === 'SecurityError') break; }
+  }
+  if (closed) { stream?.getTracks().forEach((mediaTrack) => mediaTrack.stop()); return; }
+  if (!stream) {
+    console.warn('Live camera unavailable', lastError);
+    frame.classList.add('camera-error');
+    const denied = lastError?.name === 'NotAllowedError' || lastError?.name === 'SecurityError';
+    status.textContent = denied ? 'Camera access is off' : 'No camera available';
+    guide.textContent = denied ? 'Allow camera access in your browser settings, or tap Photos' : 'Tap Photos to pick an image instead';
     indicator.querySelector('span').textContent = 'Unavailable';
     return;
   }
-  if (!await detectorReady) {
-    status.textContent = 'Edge detector could not load'; indicator.querySelector('span').textContent = 'Capture manually';
+  try {
+    track = stream.getVideoTracks()[0];
+    video.srcObject = stream;
+    // Wait for real frame dimensions before drawing overlays or detecting.
+    await new Promise((resolve) => {
+      if (video.videoWidth) return resolve();
+      const done = () => { video.removeEventListener('loadedmetadata', done); resolve(); };
+      video.addEventListener('loadedmetadata', done); setTimeout(done, 2500);
+    });
+    await video.play().catch(() => {});
+    sizeOverlay();
+  } catch (error) {
+    console.warn('Camera preview failed', error);
+    frame.classList.add('camera-error');
+    status.textContent = 'Camera preview failed'; guide.textContent = 'Tap Photos to pick an image instead';
     return;
   }
-  status.textContent = 'Finding the document edges…'; await analyze(); timer = setInterval(analyze, 420);
+  if (closed) return;
+  // Best-effort tuning: continuous autofocus sharpens text; the torch button
+  // only appears when the hardware reports support for it.
+  try {
+    const capabilities = track.getCapabilities?.() || {};
+    if (capabilities.focusMode?.includes?.('continuous')) await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+    if (capabilities.torch) torchButton.hidden = false;
+  } catch (error) { console.warn('Camera tuning skipped', error); }
+  ready = true; status.textContent = 'Point at a document to find its edges';
+  if (!await detectorReady) {
+    status.textContent = 'Automatic edges unavailable · capture manually'; indicator.querySelector('span').textContent = 'Manual';
+    return;
+  }
+  if (closed) return;
+  loop();
 }
 
 async function createDemoDocument() {

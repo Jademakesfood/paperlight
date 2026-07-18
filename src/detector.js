@@ -371,3 +371,65 @@ export async function detectDocumentDetailed(source, maxDimension = 900) {
 export async function detectDocument(source, maxDimension = 900) {
   return (await detectDocumentDetailed(source, maxDimension))?.corners || null;
 }
+
+// A single reusable scratch canvas keeps the live viewfinder loop from
+// allocating (and garbage collecting) a fresh frame buffer on every tick,
+// which matters a great deal on phones.
+let scratch;
+function scratchCanvas(width, height) {
+  if (!scratch) {
+    scratch = document.createElement('canvas');
+    // Priming the context with willReadFrequently lets the browser keep the
+    // bitmap on the CPU, which is what OpenCV's imread needs every frame.
+    scratch.getContext('2d', { alpha: false, willReadFrequently: true });
+  }
+  if (scratch.width !== width) scratch.width = width;
+  if (scratch.height !== height) scratch.height = height;
+  return scratch;
+}
+
+// A deliberately lean detector for the real-time camera preview. It runs one
+// Canny + contour pass at a small resolution instead of the eight-pass
+// consensus pipeline in detectDocumentDetailed, so it stays responsive at a
+// few frames per second on a phone. The heavy detector is reserved for the
+// one-shot still after the shutter is pressed, where quality matters more
+// than latency.
+export async function detectDocumentLive(source, maxDimension = 480) {
+  const cv = await prepareDetector();
+  const image = source instanceof HTMLCanvasElement || source instanceof HTMLVideoElement ? source : await new Promise((resolve, reject) => {
+    const element = new Image(); element.onload = () => resolve(element); element.onerror = reject; element.src = source;
+  });
+  const naturalWidth = image.videoWidth || image.naturalWidth || image.width;
+  const naturalHeight = image.videoHeight || image.naturalHeight || image.height;
+  if (!naturalWidth || !naturalHeight) return null;
+  const scale = Math.min(1, maxDimension / Math.max(naturalWidth, naturalHeight));
+  const width = Math.max(1, Math.round(naturalWidth * scale));
+  const height = Math.max(1, Math.round(naturalHeight * scale));
+  const canvas = scratchCanvas(width, height);
+  canvas.getContext('2d', { alpha: false, willReadFrequently: true }).drawImage(image, 0, 0, width, height);
+
+  const src = cv.imread(canvas); const gray = new cv.Mat(); const blurred = new cv.Mat(); const canny = new cv.Mat();
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+  const candidates = [];
+  try {
+    cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+    const median = medianIntensity(blurred);
+    const low = Math.max(20, Math.round(median * 0.5));
+    const high = Math.max(low + 30, Math.min(220, Math.round(median * 1.3)));
+    cv.Canny(blurred, canny, low, high, 3, true);
+    cv.morphologyEx(canny, canny, cv.MORPH_CLOSE, kernel, new cv.Point(-1, -1), 2);
+    cv.dilate(canny, canny, kernel, new cv.Point(-1, -1), 1);
+    collectCandidates(cv, canny, width, height, candidates, canny, blurred, 0, true);
+    if (!candidates.length) return null;
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    if (best.score < 0.3 || best.coverage < 0.06 || best.support < 0.22) return null;
+    return {
+      corners: best.corners.map((point) => ({ x: Math.max(0, Math.min(1, point.x / width)), y: Math.max(0, Math.min(1, point.y / height)) })),
+      confidence: Math.max(0.2, Math.min(0.98, 0.18 + best.score * 0.6 + best.support * 0.22)),
+    };
+  } finally {
+    src.delete(); gray.delete(); blurred.delete(); canny.delete(); kernel.delete();
+  }
+}

@@ -65,19 +65,25 @@ export async function exportWord(document) {
   await shareOrDownload(blob, `${safeName(document.name)}.docx`, document.name, false);
 }
 
-export async function exportImages(document) {
-  if (document.pages.length === 1) {
-    const blob = new Blob([dataUrlToBytes(document.pages[0].processed)], { type: 'image/jpeg' });
-    await shareOrDownload(blob, `${safeName(document.name)}.jpg`, document.name);
+export async function exportImages(doc) {
+  if (doc.pages.length === 1) {
+    const blob = new Blob([dataUrlToBytes(doc.pages[0].processed)], { type: 'image/jpeg' });
+    await shareOrDownload(blob, `${safeName(doc.name)}.jpg`, doc.name);
     return;
   }
-  const files = document.pages.map((page, i) => new File([dataUrlToBytes(page.processed)], `${safeName(document.name)}-${i + 1}.jpg`, { type: 'image/jpeg' }));
-  if (navigator.canShare?.({ files })) await navigator.share({ files, title: document.name });
-  else {
-    for (const file of files) {
-      const url = URL.createObjectURL(file);
-      const anchor = document.createElement('a'); anchor.href = url; anchor.download = file.name; anchor.click();
-      URL.revokeObjectURL(url);
-    }
+  const files = doc.pages.map((page, i) => new File([dataUrlToBytes(page.processed)], `${safeName(doc.name)}-${i + 1}.jpg`, { type: 'image/jpeg' }));
+  if (navigator.canShare?.({ files })) {
+    try { await navigator.share({ files, title: doc.name }); return; }
+    catch (error) { if (error.name === 'AbortError') return; }
+  }
+  // Fallback: save each page. Downloads are staggered so browsers do not drop
+  // all but the first, and each object URL is revoked only after it is used.
+  for (const [index, file] of files.entries()) {
+    await new Promise((resolve) => setTimeout(resolve, index ? 350 : 0));
+    const url = URL.createObjectURL(file);
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = file.name; anchor.rel = 'noopener';
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   }
 }

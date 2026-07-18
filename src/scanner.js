@@ -214,7 +214,10 @@ export async function processPage(source, corners = defaultCorners(), filter = '
   let warped;
   try { warped = await projectiveWarp(image, sourcePoints, width, height, scale); }
   catch (error) { console.warn('Perspective engine unavailable; using compatibility warp', error); warped = meshWarp(image, sourcePoints, width, height); }
-  await applyScannerFilter(warped, filter);
+  // Never lose a capture to a filter failure: if enhancement can't run (for
+  // example the vision engine failed to load), keep the geometry-corrected page.
+  try { await applyScannerFilter(warped, filter); }
+  catch (error) { console.warn('Enhancement unavailable; keeping the unfiltered scan', error); }
 
   const turns = ((rotation % 360) + 360) % 360;
   if (!turns) return warped.toDataURL('image/jpeg', 0.9);

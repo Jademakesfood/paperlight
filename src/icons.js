@@ -19,6 +19,7 @@ export const icon = (name, size = 20) => {
     shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
     chevron: '<path d="m9 18 6-6-6-6"/>',
     crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14M2 6h14a2 2 0 0 1 2 2v14"/>',
+    flash: '<path d="M13 2 4.1 12.7a.7.7 0 0 0 .54 1.15H11l-1 8.15 8.9-10.7a.7.7 0 0 0-.54-1.15H12z"/>',
   };
   return `<svg aria-hidden="true" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${paths[name] || ''}</svg>`;
 };

@@ -1,5 +1,5 @@
-const CACHE = 'paperlight-v7';
-const CORE = ['./', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
+const CACHE = 'paperlight-v8';
+const CORE = ['./', './index.html', './manifest.webmanifest', './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(CORE)).then(() => self.skipWaiting()));
@@ -11,20 +11,37 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  const isLocal = url.origin === self.location.origin;
+  const isNavigation = event.request.mode === 'navigate';
+
   event.respondWith((async () => {
-    const isLocal = event.request.url.startsWith(self.location.origin);
+    const cache = await caches.open(CACHE);
+
+    // Navigations are network-first so a new deploy is picked up immediately,
+    // with the cached app shell as an offline fallback.
+    if (isNavigation) {
+      try {
+        const response = await fetch(event.request);
+        if (response.ok) cache.put('./', response.clone());
+        return response;
+      } catch {
+        return (await caches.match(event.request)) || (await caches.match('./')) || Response.error();
+      }
+    }
+
+    // Everything else (content-hashed bundles, icons, fonts, the OCR model) is
+    // cache-first: fast, and it keeps the app fully working offline.
     const cached = await caches.match(event.request);
-    if (!isLocal && cached) return cached;
+    if (cached) return cached;
     try {
       const response = await fetch(event.request);
-      if (response.ok && (isLocal || event.request.url.includes('tessdata'))) {
-        const copy = response.clone();
-        const cache = await caches.open(CACHE);
-        await cache.put(event.request, copy);
+      if (response.ok && (isLocal || event.request.url.includes('tessdata') || url.hostname.includes('fonts'))) {
+        cache.put(event.request, response.clone());
       }
       return response;
     } catch {
-      return caches.match('./');
+      return Response.error();
     }
   })());
 });
